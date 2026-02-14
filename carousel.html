@@ -5,131 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Art Curator</title>
   <style>
-    :root {
-      --bg: #ffffff;
-      --card-bg: #f8f8f8;
-      --card-border: #e0e0e0;
-      --text-primary: #1a1a1a;
-      --text-secondary: #666666;
-      --selected-border: #2563eb;
-      --selected-shadow: rgba(37, 99, 235, 0.3);
-    }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #1a1a1a;
-        --card-bg: #2a2a2a;
-        --card-border: #3a3a3a;
-        --text-primary: #e8e8e8;
-        --text-secondary: #999999;
-        --selected-border: #3b82f6;
-        --selected-shadow: rgba(59, 130, 246, 0.4);
-      }
-    }
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text-primary);
-      overflow: hidden;
-    }
-
-    #carousel {
-      display: flex;
-      gap: 12px;
-      padding: 12px;
-      overflow-x: auto;
-      scroll-snap-type: x mandatory;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: thin;
-    }
-
-    #carousel::-webkit-scrollbar {
-      height: 6px;
-    }
-
-    #carousel::-webkit-scrollbar-thumb {
-      background: var(--card-border);
-      border-radius: 3px;
-    }
-
-    .card {
-      flex: 0 0 200px;
-      scroll-snap-align: start;
-      background: var(--card-bg);
-      border: 2px solid var(--card-border);
-      border-radius: 10px;
-      overflow: hidden;
-      cursor: pointer;
-      transition: border-color 0.15s, box-shadow 0.15s;
-    }
-
-    .card:hover {
-      border-color: var(--selected-border);
-    }
-
-    .card.selected {
-      border-color: var(--selected-border);
-      box-shadow: 0 0 0 3px var(--selected-shadow);
-    }
-
-    .card-img {
-      width: 200px;
-      height: 200px;
-      object-fit: cover;
-      display: block;
-      background: var(--card-border);
-    }
-
-    .card-info {
-      padding: 8px 10px;
-    }
-
-    .card-title {
-      font-size: 13px;
-      font-weight: 600;
-      line-height: 1.3;
-      color: var(--text-primary);
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
-
-    .card-artist {
-      font-size: 12px;
-      color: var(--text-secondary);
-      margin-top: 3px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .card-date {
-      font-size: 11px;
-      color: var(--text-secondary);
-      margin-top: 2px;
-    }
-
-    #loading {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 100px;
-      color: var(--text-secondary);
-      font-size: 14px;
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; }
+    body { background: #000; }
+    #img { width: 100%; display: none; }
   </style>
 </head>
 <body>
-  <div id="loading">Loading artworks...</div>
-  <div id="carousel"></div>
+  <img id="img" />
   <script type="module" src="/src/carousel.ts"></script>
 </body>
 </html>

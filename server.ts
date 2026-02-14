@@ -22,8 +22,7 @@ db.pragma("journal_mode = WAL");
 db.pragma("busy_timeout = 5000");
 
 const MAX_ROWS = 100;
-const MAX_CAROUSEL = 20;
-const carouselResourceUri = "ui://art-curator/carousel.html";
+const resourceUri = "ui://art-curator/carousel.html";
 
 function createServer(): McpServer {
   const server = new McpServer({
@@ -108,59 +107,41 @@ Return results as JSON. Max ${MAX_ROWS} rows per query.`;
     }
   );
 
-  // --- Tool: show_artworks (with carousel UI) ---
+  // --- Tool: show_artwork (single image with UI) ---
   registerAppTool(
     server,
-    "show_artworks",
+    "show_artwork",
     {
-      title: "Show Artworks",
+      title: "Show Artwork",
       description:
-        "Display selected artworks in an interactive carousel. Call query_artworks first to find artworks, then pass the IDs of the best matches here.",
+        "Display a single artwork image inline. Call query_artworks first to find artworks, then pass one ID here. Call multiple times to show multiple images.",
       inputSchema: z.object({
-        ids: z.array(z.number().int()).describe("Array of artwork IDs to display in the carousel"),
+        id: z.number().int().describe("Artwork ID to display"),
       }),
-      _meta: { ui: { resourceUri: carouselResourceUri } },
+      _meta: { ui: { resourceUri } },
     },
-    async (args: { ids: number[] }) => {
-      const ids = args.ids.slice(0, MAX_CAROUSEL);
-      if (ids.length === 0) {
+    async (args: { id: number }) => {
+      const row = db
+        .prepare("SELECT * FROM artworks WHERE id = ?")
+        .get(args.id) as Record<string, unknown> | undefined;
+
+      if (!row) {
         return {
           content: [
-            { type: "text" as const, text: "No artwork IDs provided." },
+            { type: "text" as const, text: `Artwork ID ${args.id} not found.` },
           ],
         };
       }
-
-      const placeholders = ids.map(() => "?").join(",");
-      const rows = db
-        .prepare(`SELECT * FROM artworks WHERE id IN (${placeholders})`)
-        .all(...ids) as Record<string, unknown>[];
-
-      // Preserve input order
-      const byId = new Map(rows.map((r) => [r.id as number, r]));
-      const ordered = ids
-        .map((id) => byId.get(id))
-        .filter((r): r is Record<string, unknown> => r !== undefined);
-
-      // Text summary for Claude
-      const summary = ordered
-        .map((r) => {
-          const parts = [r.title as string];
-          if (r.artist_name) parts.push(`by ${r.artist_name}`);
-          if (r.object_date) parts.push(`(${r.object_date})`);
-          return `- ${parts.join(" ")}`;
-        })
-        .join("\n");
 
       return {
         content: [
           {
             type: "text" as const,
-            text: `Showing ${ordered.length} artworks:\n${summary}`,
+            text: JSON.stringify(row, null, 2),
           },
         ],
         structuredContent: {
-          artworks: ordered,
+          artwork: row,
         },
       };
     }
@@ -169,8 +150,8 @@ Return results as JSON. Max ${MAX_ROWS} rows per query.`;
   // --- Resource: carousel HTML ---
   registerAppResource(
     server,
-    "Carousel UI",
-    carouselResourceUri,
+    "Artwork Viewer",
+    resourceUri,
     { mimeType: RESOURCE_MIME_TYPE },
     async () => {
       const htmlPath = path.join(DIST_DIR, "carousel.html");
@@ -178,7 +159,7 @@ Return results as JSON. Max ${MAX_ROWS} rows per query.`;
       return {
         contents: [
           {
-            uri: carouselResourceUri,
+            uri: resourceUri,
             mimeType: RESOURCE_MIME_TYPE,
             text: html,
             _meta: {
