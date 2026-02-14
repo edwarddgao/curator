@@ -1,6 +1,6 @@
 # Art Curator MCP App — Specification
 
-> An MCP App that gives Claude direct SQL access to a database of captioned museum artworks, enabling Claude to act as an art curator — searching, recommending, and discussing art within a carousel UI embedded in the conversation.
+> An MCP App that gives Claude direct SQL access to a database of captioned museum artworks, enabling Claude to act as an art curator — searching, recommending, and discussing art with artwork images embedded inline in the conversation.
 
 ## References
 
@@ -13,7 +13,7 @@
 
 ## 1. Product Vision
 
-Claude acts as an **art curator**. Users ask Claude about art in natural language ("find me paintings of boats in storms", "show me Vermeer", "what impressionist landscapes do you have?"). Claude queries a database of captioned museum artworks, curates the best matches, and displays them in an interactive carousel UI embedded directly in the chat.
+Claude acts as an **art curator**. Users ask Claude about art in natural language ("find me paintings of boats in storms", "show me Vermeer", "what impressionist landscapes do you have?"). Claude queries a database of captioned museum artworks, curates the best matches, and displays them as inline images embedded directly in the chat.
 
 **This is NOT visual similarity search.** The original artalike app's "find similar" feature (FAISS embeddings) is dropped entirely. Instead, Claude's intelligence is the search engine — it writes SQL queries, reads results, selects the best matches, and presents them with commentary.
 
@@ -31,7 +31,7 @@ Single Node.js process. No external services.
 [Claude] ──HTTPS──▶ [Node.js + Express]
                        ├─ MCP protocol handler (StreamableHTTPServerTransport)
                        ├─ SQLite + FTS5 (embedded, read-only)
-                       └─ Bundled HTML (carousel UI resource)
+                       └─ Bundled HTML (artwork image viewer resource)
 ```
 
 - **Server:** Node.js + Express + `@modelcontextprotocol/sdk`
@@ -97,89 +97,30 @@ The Louvre was dropped from V1 due to French-only metadata.
 
 ### 4.1 `query_artworks` — SQL execution (no UI)
 
-Claude writes raw SQL queries against the artworks database. Returns results as JSON text.
+Claude writes raw SQL queries against the artworks database. Returns results as JSON text. Registered via `server.tool()` (not `registerAppTool`) since it has no UI.
+
+**Input:** `{ sql: string }` — read-only SQL query (SELECT only)
+**Returns:** Text content with JSON array of matching rows. Max 100 rows. No UI.
+
+### 4.2 `show_artwork` — Display single artwork image (with UI)
+
+Displays a single artwork image inline in the chat. Claude calls this after curating search results. To show multiple artworks, Claude calls this tool multiple times. Artist name, date, and commentary are written by Claude as conversation text — the UI is just the image.
+
+**Input:** `{ id: number }` — single artwork ID
+**Returns:** Text content with full artwork metadata (JSON) + `structuredContent.artwork` for the UI.
 
 ```typescript
-registerAppTool(server, "query_artworks", {
-  title: "Query Artworks",
-  description: `Execute a read-only SQL query against the artworks database.
+const resourceUri = "ui://art-curator/carousel.html";
 
-Schema:
-  artworks (
-    id INTEGER PRIMARY KEY,
-    title TEXT,
-    artist_name TEXT,
-    artist_bio TEXT,
-    artist_nationality TEXT,
-    artist_birth_year INTEGER,
-    artist_death_year INTEGER,
-    object_date TEXT,           -- display string, e.g. "ca. 1662"
-    date_begin INTEGER,         -- e.g. 1657
-    date_end INTEGER,           -- e.g. 1667
-    medium TEXT,                -- e.g. "Oil on canvas"
-    dimensions TEXT,
-    department TEXT,
-    classification TEXT,
-    culture TEXT,
-    period TEXT,
-    caption TEXT,               -- AI-generated visual description
-    keywords TEXT,              -- comma-separated searchable terms
-    image_url TEXT,             -- full resolution (Met CDN)
-    thumbnail_url TEXT,         -- web-size (Met CDN)
-    object_url TEXT,            -- link to Met museum page
-    credit_line TEXT,
-    accession_number TEXT,
-    gallery_number TEXT,
-    is_highlight BOOLEAN
-  )
-
-  artworks_fts (FTS5 virtual table over: title, artist_name, medium, caption, keywords, culture, period, department)
-
-Example queries:
-  SELECT * FROM artworks WHERE artist_name LIKE '%Vermeer%' LIMIT 20;
-  SELECT * FROM artworks_fts WHERE artworks_fts MATCH 'boats AND storms' LIMIT 20;
-  SELECT * FROM artworks WHERE date_begin >= 1800 AND date_end <= 1899 AND department = 'European Paintings' LIMIT 20;
-  SELECT COUNT(*) as count, department FROM artworks GROUP BY department ORDER BY count DESC;
-
-Return results as JSON. Max 100 rows per query.`,
-  inputSchema: {
-    type: "object",
-    properties: {
-      sql: { type: "string", description: "Read-only SQL query (SELECT only)" }
-    },
-    required: ["sql"]
-  }
+registerAppTool(server, "show_artwork", {
+  title: "Show Artwork",
+  description: "Display a single artwork image inline. Call query_artworks first to find artworks, then pass one ID here. Call multiple times to show multiple images.",
+  inputSchema: z.object({
+    id: z.number().int().describe("Artwork ID to display"),
+  }),
+  _meta: { ui: { resourceUri } }
 });
 ```
-
-**Returns:** Text content with JSON array of matching rows. No UI.
-
-### 4.2 `show_artworks` — Display carousel (with UI)
-
-Renders selected artworks in the carousel UI embedded in the chat. Claude calls this after curating search results.
-
-```typescript
-const carouselResourceUri = "ui://art-curator/carousel.html";
-
-registerAppTool(server, "show_artworks", {
-  title: "Show Artworks",
-  description: "Display selected artworks in an interactive carousel. Call query_artworks first to find artworks, then pass the IDs of the best matches here.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      ids: {
-        type: "array",
-        items: { type: "integer" },
-        description: "Array of artwork IDs to display in the carousel"
-      }
-    },
-    required: ["ids"]
-  },
-  _meta: { ui: { resourceUri: carouselResourceUri } }
-});
-```
-
-**Returns:** Text content with artwork metadata (so Claude can comment) + renders carousel UI.
 
 ### 4.3 Interaction Flow
 
@@ -187,14 +128,11 @@ registerAppTool(server, "show_artworks", {
 1. User: "Find me paintings of boats in storms"
 2. Claude calls query_artworks({ sql: "SELECT * FROM artworks_fts WHERE artworks_fts MATCH 'boats storms' LIMIT 20" })
    → Returns 20 rows of metadata as JSON text to Claude
-3. Claude reads results, picks the 5 best matches
-4. Claude calls show_artworks({ ids: [4523, 8901, 12045, 15678, 19234] })
-   → Carousel UI renders in chat with those 5 artworks
-   → Claude also receives text metadata to write commentary
-5. Claude writes: "Here are 5 dramatic paintings of ships in stormy seas..."
-6. User taps an artwork in the carousel
-   → App pushes full metadata to Claude via context update
-7. Claude: "That's 'The Storm on the Sea of Galilee' by Rembrandt, 1633..."
+3. Claude reads results, picks the best matches
+4. Claude calls show_artwork({ id: 4523 }) for each selected artwork
+   → Each call renders the artwork image inline in the chat
+   → Claude also receives full metadata as text
+5. Claude writes commentary: artist name, date, description, context
 ```
 
 Claude can iterate: if the first query returns poor results, it can try different keywords, add filters, or broaden the search.
@@ -227,7 +165,7 @@ CREATE TABLE artworks (
   caption TEXT,                 -- Haiku-generated visual description
   keywords TEXT,                -- comma-separated searchable terms
   image_url TEXT,               -- primaryImage (full resolution, may be empty for some works)
-  thumbnail_url TEXT NOT NULL,  -- primaryImageSmall (web-size ~480-800px, used for carousel display + captioning)
+  thumbnail_url TEXT NOT NULL,  -- primaryImageSmall (web-size ~480-800px, fallback for display + captioning)
   object_url TEXT,              -- Met museum page URL
   credit_line TEXT,
   accession_number TEXT,
@@ -316,10 +254,11 @@ Claude writes raw SQL, but the database is **read-only**:
 
 ### 7.2 MCP App sandbox
 
-- The carousel UI runs in a sandboxed iframe controlled by the host (Claude)
+- The artwork viewer runs in a sandboxed iframe controlled by the host (Claude)
 - No access to parent window DOM, cookies, or local storage
 - Communication only via postMessage (abstracted by `@modelcontextprotocol/ext-apps` `App` class)
 - Image URLs point to Met Museum CDN — no self-hosted images
+- CSP `resourceDomains` allowlists `https://images.metmuseum.org` for image loading
 
 ### 7.3 Authentication
 
@@ -329,48 +268,28 @@ Claude writes raw SQL, but the database is **read-only**:
 
 ---
 
-## 8. MCP App UI (Carousel)
+## 8. MCP App UI (Artwork Viewer)
 
 ### 8.1 Technology
 
-- Vanilla JavaScript (no framework) — matches original artalike approach
+- Vanilla TypeScript, no framework
 - Bundled into single HTML file via Vite + `vite-plugin-singlefile`
 - Served as a `ui://` resource by the MCP server
 
-### 8.2 Carousel design
+### 8.2 Design
 
-- **Layout:** Horizontal card carousel, swipeable
-- **Card content:** Thumbnail image, title, artist name, date (details TBD during implementation)
-- **Interaction:** Tap/click a card to view larger + push context to Claude
-- **No in-app controls:** No search bar, no filters, no "more like this" buttons. All interaction goes through Claude.
-- **Responsive:** Adapts to the iframe width provided by the host
+- **Layout:** Single `<img>` element, `width: 100%`, filling the iframe width
+- **Content:** Just the artwork image — no text overlay, no cards, no controls
+- **Artist name, date, commentary:** Written by Claude as conversation text, not in the UI
+- **Multiple images:** Claude calls `show_artwork` once per image. Each call produces a separate inline image in the chat.
 
-### 8.3 Claude-aware browsing
+### 8.3 Data flow
 
-When the user taps an artwork in the carousel, the app pushes a **context update** to Claude containing the full metadata:
-
-```typescript
-app.updateContext({
-  type: "artwork_selected",
-  data: {
-    id: 12345,
-    title: "Young Woman with a Water Pitcher",
-    artist_name: "Johannes Vermeer",
-    object_date: "ca. 1662",
-    medium: "Oil on canvas",
-    department: "European Paintings",
-    caption: "A woman in a blue dress stands beside a sunlit window...",
-    image_url: "https://images.metmuseum.org/...",
-    object_url: "https://www.metmuseum.org/art/collection/search/437881"
-  }
-});
-```
-
-This lets Claude respond to what the user is looking at without an explicit question — e.g., offering more information about the artist, suggesting related works, or providing historical context.
+The UI receives artwork data via `app.ontoolresult`, which provides `structuredContent.artwork`. The image `src` is set to `image_url` (full resolution) with fallback to `thumbnail_url`.
 
 ### 8.4 State management
 
-Each `show_artworks` tool invocation **replaces** the carousel contents. Previous results are not accumulated. Claude remembers prior searches in its conversation context and can reference them.
+Each `show_artwork` tool call renders one image in its own iframe. No accumulated state. Claude remembers prior searches in its conversation context.
 
 ---
 
@@ -529,9 +448,9 @@ curator/
 ├── tsconfig.json
 ├── vite.config.ts
 ├── server.ts                  # MCP server (tools + resources + Express)
-├── carousel.html              # Carousel UI entry point
+├── carousel.html              # Artwork viewer UI entry point
 ├── src/
-│   └── carousel.ts            # Carousel UI logic (App class, rendering)
+│   └── carousel.ts            # Artwork viewer logic (App class, image rendering)
 ├── scripts/                   # Data pipeline (Python)
 │   ├── crawl.py               # Step 1: Crawl Met API
 │   ├── caption.py             # Step 2: Caption via Haiku Batch
@@ -557,16 +476,16 @@ curator/
 | Museum source | Met Museum only (V1) | Public domain images, English metadata, no auth, existing crawler |
 | Similarity search | Dropped | Full pivot to "Claude as curator" — Claude's intelligence replaces embeddings |
 | Vector database | Not needed | FTS5 + Claude's keyword intelligence is sufficient for V1 |
-| UI paradigm | Carousel/card in MCP App iframe | Conversation-native, compact, swipeable |
-| Interaction model | Claude-only | No in-app search/filter controls. All queries go through Claude. |
-| Claude awareness | Full metadata push on tap | Claude can respond to what user is browsing |
+| UI paradigm | Single full-width image per tool call | Simplest possible — one image per iframe, Claude handles all text |
+| Interaction model | Claude-only | No in-app controls. All queries and commentary go through Claude. |
+| Multiple images | Multiple tool calls | Claude calls `show_artwork` once per image, writes artist/date as text |
 | Auth | None (public) | All data is public domain CC0. Read-only access. |
 | SQL safety | Read-only + timeout | DB is read-only, 5s timeout, 100-row cap, SELECT-only validation |
 | French text (Louvre) | Dropped Louvre | Met-only eliminates the language problem entirely |
 | Data pipeline language | Python (separate from runtime) | Batch jobs; Python has better ML/data tooling |
 | Pipeline stages | Separate steps | Each step re-runnable independently |
 | Crawl strategy | CSV filter + API fetch + residential proxy | CSV gives exact 248K public domain IDs (zero false positives vs 28% from search API). API only needed for image URLs. Residential proxy rotation bypasses Imperva WAF per-IP limit: ~3 hours instead of ~52. |
-| Image storage | URLs only, no downloads | Claude API accepts image URLs directly for captioning. Runtime carousel loads from Met CDN. Zero image storage. |
+| Image storage | URLs only, no downloads | Claude API accepts image URLs directly for captioning. Runtime viewer loads from Met CDN. Zero image storage. |
 | Deployment | Fly.io (recommended) | Sub-second cold start with auto-stop. Best fit for low-traffic MCP server. Hetzner VPS as runner-up. |
 | Naming | Deferred | Ship first, name later |
 
@@ -581,7 +500,7 @@ curator/
 - **Louvre integration** (requires French → English translation pipeline)
 - **Connectors directory listing** (requires meeting Anthropic quality standards)
 - **Text-to-image search via SigLip2** (original artalike had this potential)
-- **Richer carousel** (detail view, zoom, museum link, related works)
+- **Richer viewer** (detail view, zoom, museum link, related works)
 
 ---
 
@@ -596,16 +515,16 @@ Crawl is complete (248K objects, ~3 hours via residential proxy). No longer the 
 2. Run crawl (~3 hrs via residential proxy)     ✅ Done — 248,472 rows, 243,054 valid
 ```
 
-### Phase 2: Server + UI
+### Phase 2: Server + UI ✅
 
 ```
-3. Scaffold Node.js project (package.json, tsconfig, vite.config, server.ts)
-4. Write build_db.py
-5. Build test DB from crawled artworks (no captions yet)
-6. Implement query_artworks tool
-7. Implement show_artworks tool
-8. Build carousel UI (carousel.html + carousel.ts)
-9. Test end-to-end locally (cloudflared tunnel + Claude)
+3. Scaffold Node.js project                     ✅ Done
+4. Write build_db.py                             ✅ Done
+5. Build test DB (243,054 artworks, 155 MB)      ✅ Done
+6. Implement query_artworks tool                 ✅ Done
+7. Implement show_artwork tool                   ✅ Done
+8. Build artwork viewer UI                       ✅ Done
+9. Test end-to-end (cloudflared + Claude)         ✅ Done
 ```
 
 ### Phase 3: Captioning
@@ -637,9 +556,14 @@ Crawl is complete (248K objects, ~3 hours via residential proxy). No longer the 
 
 ## 15. Open Questions (to resolve during implementation)
 
-- **Carousel card content:** Exact fields shown on each card (title + artist + date minimum, but visual density TBD)
-- **Full image handling:** Whether to show full-res images in the app or link to Met museum page
-- **Context update frequency:** Push on every tap, or debounce/throttle?
-- **Captioning batch size:** How to chunk 248K images into Batch API requests
+- **Captioning batch size:** How to chunk 243K images into Batch API requests
 - **FTS5 tokenizer:** Default vs porter stemming vs unicode61
 - **Deployment region:** Fly.io region selection (US-east to minimize latency to Anthropic's servers)
+
+### Resolved
+
+- **UI design:** Single full-width image per tool call. Claude writes all text (artist, date, commentary). No carousel/cards.
+- **Full image handling:** UI shows `image_url` (full res) with fallback to `thumbnail_url`. Both from Met CDN.
+- **Context updates:** Not needed — each `show_artwork` call returns full metadata as text to Claude.
+- **CSP for images:** Use `resourceDomains` (not `connectDomains`) to allowlist Met CDN.
+- **registerAppTool vs server.tool:** `query_artworks` (no UI) uses `server.tool()` with Zod schemas. `show_artwork` (with UI) uses `registerAppTool` which requires `_meta.ui.resourceUri`.
