@@ -10,6 +10,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RAW_DB = os.path.join(SCRIPT_DIR, "../data/raw_artworks.db")
 OUT_DB = os.path.join(SCRIPT_DIR, "../data/artworks.db")
 CAPTIONS_DB = os.path.join(SCRIPT_DIR, "../data/captions.db")
+PAGES_DB = os.path.join(SCRIPT_DIR, "../data/met_pages.db")
 BATCH_SIZE = 5000
 
 
@@ -55,7 +56,7 @@ def create_schema(conn):
             culture TEXT,
             period TEXT,
             caption TEXT,
-            keywords TEXT,
+            description TEXT,
             image_url TEXT,
             thumbnail_url TEXT NOT NULL,
             object_url TEXT,
@@ -79,7 +80,7 @@ def create_fts(conn):
             artist_name,
             medium,
             caption,
-            keywords,
+            description,
             culture,
             period,
             department,
@@ -97,16 +98,31 @@ def load_captions(captions_db_path):
         return {}
     log(f"Loading captions from {captions_db_path}...")
     conn = sqlite3.connect(captions_db_path)
-    cursor = conn.execute("SELECT met_object_id, caption, keywords FROM captions")
+    cursor = conn.execute("SELECT met_object_id, caption FROM captions")
     captions = {}
     for row in cursor:
-        captions[row[0]] = (row[1], row[2])
+        captions[row[0]] = row[1]
     conn.close()
     log(f"  Loaded {len(captions)} captions")
     return captions
 
 
-def parse_artwork(data, captions):
+def load_page_content(pages_db_path):
+    """Load page descriptions from met_pages.db if it exists."""
+    if not os.path.exists(pages_db_path):
+        return {}
+    log(f"Loading page content from {pages_db_path}...")
+    conn = sqlite3.connect(pages_db_path)
+    cursor = conn.execute("SELECT met_object_id, description FROM page_content WHERE description IS NOT NULL")
+    pages = {}
+    for row in cursor:
+        pages[row[0]] = row[1]
+    conn.close()
+    log(f"  Loaded {len(pages)} descriptions")
+    return pages
+
+
+def parse_artwork(data, captions, pages):
     """Parse Met API JSON into a tuple for insertion."""
     met_id = data["objectID"]
 
@@ -115,7 +131,8 @@ def parse_artwork(data, captions):
     if not thumbnail_url:
         return None  # skip if no thumbnail
 
-    caption, keywords = captions.get(met_id, (None, None))
+    caption = captions.get(met_id)
+    description = pages.get(met_id)
 
     return (
         met_id,
@@ -135,7 +152,7 @@ def parse_artwork(data, captions):
         nullable(data.get("culture")),
         nullable(data.get("period")),
         caption,
-        keywords,
+        description,
         nullable(data.get("primaryImage")),
         thumbnail_url,
         nullable(data.get("objectURL")),
@@ -151,13 +168,13 @@ INSERT_SQL = """
         met_object_id, title, artist_name, artist_bio, artist_nationality,
         artist_birth_year, artist_death_year, object_date, date_begin, date_end,
         medium, dimensions, department, classification, culture, period,
-        caption, keywords, image_url, thumbnail_url, object_url,
+        caption, description, image_url, thumbnail_url, object_url,
         credit_line, accession_number, gallery_number, is_highlight
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
-def build(raw_db=RAW_DB, out_db=OUT_DB, captions_db=CAPTIONS_DB):
+def build(raw_db=RAW_DB, out_db=OUT_DB, captions_db=CAPTIONS_DB, pages_db=PAGES_DB):
     if not os.path.exists(raw_db):
         log(f"Error: {raw_db} not found")
         sys.exit(1)
@@ -167,8 +184,9 @@ def build(raw_db=RAW_DB, out_db=OUT_DB, captions_db=CAPTIONS_DB):
         os.remove(out_db)
         log(f"Removed existing {out_db}")
 
-    # Load captions if available
+    # Load captions and page content if available
     captions = load_captions(captions_db)
+    pages = load_page_content(pages_db)
 
     # Create output DB
     out_conn = sqlite3.connect(out_db)
@@ -192,7 +210,7 @@ def build(raw_db=RAW_DB, out_db=OUT_DB, captions_db=CAPTIONS_DB):
     for met_id, data_json in cursor:
         try:
             data = json.loads(data_json)
-            row = parse_artwork(data, captions)
+            row = parse_artwork(data, captions, pages)
             if row is None:
                 skipped += 1
                 continue

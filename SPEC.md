@@ -44,14 +44,18 @@ Single Node.js process. No external services.
 Separate from the runtime server. Produces a `.db` file that ships inside the container.
 
 ```
-crawl.py ──▶ caption.py ──▶ build_db.py ──▶ artworks.db
-   │              │               │
-   │              │               └─ Build SQLite DB + FTS5 index
+crawl.py ──▶ caption.py ───┐
+   │              │         ├──▶ build_db.py ──▶ artworks.db
+   │              │         │         │
+   │        crawl_pages.py ─┘         └─ Build SQLite DB + FTS5 index
+   │              │
+   │              └─ Crawl Met collection pages for curatorial descriptions
+   │         caption.py
    │              └─ Caption images via Haiku 4.5 Batch API
    └─ Crawl Met Museum API, store raw JSON
 ```
 
-Each step is independent and re-runnable. Outputs of each step serve as inputs to the next. No step depends on the runtime server.
+Each step is independent and re-runnable. `caption.py` and `crawl_pages.py` both read from `raw_artworks.db` and can run in parallel. `build_db.py` merges all sources. No step depends on the runtime server.
 
 ### 2.3 Data Update Flow
 
@@ -126,7 +130,7 @@ registerAppTool(server, "show_artwork", {
 
 ```
 1. User: "Find me paintings of boats in storms"
-2. Claude calls query_artworks({ sql: "SELECT * FROM artworks_fts WHERE artworks_fts MATCH 'boats storms' LIMIT 20" })
+2. Claude calls query_artworks({ sql: "SELECT a.* FROM artworks a JOIN artworks_fts f ON a.rowid = f.rowid WHERE artworks_fts MATCH 'boats storms' LIMIT 20" })
    → Returns 20 rows of metadata as JSON text to Claude
 3. Claude reads results, picks the best matches
 4. Claude calls show_artwork({ id: 4523 }) for each selected artwork
@@ -134,6 +138,8 @@ registerAppTool(server, "show_artwork", {
    → Claude also receives full metadata as text
 5. Claude writes commentary: artist name, date, description, context
 ```
+
+Claude interleaves images and descriptions — after each `show_artwork` call, it writes that artwork's info before showing the next. This behavior is guided by the server's `instructions` field (sent during MCP `initialize`) and reinforced in the `show_artwork` tool description.
 
 Claude can iterate: if the first query returns poor results, it can try different keywords, add filters, or broaden the search.
 
@@ -162,8 +168,8 @@ CREATE TABLE artworks (
   classification TEXT,
   culture TEXT,
   period TEXT,
-  caption TEXT,                 -- Haiku-generated visual description
-  keywords TEXT,                -- comma-separated searchable terms
+  caption TEXT,                 -- Haiku-generated visual description (metadata-grounded)
+  description TEXT,             -- curatorial essay from Met website (NULL for ~59% of artworks)
   image_url TEXT,               -- primaryImage (full resolution, may be empty for some works)
   thumbnail_url TEXT NOT NULL,  -- primaryImageSmall (web-size ~480-800px, fallback for display + captioning)
   object_url TEXT,              -- Met museum page URL
@@ -187,7 +193,7 @@ CREATE VIRTUAL TABLE artworks_fts USING fts5(
   artist_name,
   medium,
   caption,
-  keywords,
+  description,
   culture,
   period,
   department,
@@ -199,8 +205,8 @@ CREATE VIRTUAL TABLE artworks_fts USING fts5(
 ### 5.3 Design decisions
 
 - **Flat/denormalized:** Fastest for single-table queries. No JOINs needed. Claude writes simpler SQL.
-- **FTS5:** Inverted index for fast text search with BM25 ranking. Claude can use `MATCH` for keyword search or `LIKE` for exact patterns. Both available.
-- **No tags table:** Met has structured AAT/Wikidata tags, but they're inconsistent across museums and add schema complexity. The `keywords` field (from captioning) serves the same purpose.
+- **FTS5:** Inverted index for fast text search with BM25 ranking. Claude can use `MATCH` for keyword search or `LIKE` for exact patterns. Both available. Note: `artworks_fts` does not expose `id` — always JOIN with `artworks` to get full data.
+- **No tags table:** Met has structured AAT/Wikidata tags, but they're inconsistent across museums and add schema complexity. Metadata-grounded captions serve the same search purpose.
 
 ---
 
@@ -209,34 +215,76 @@ CREATE VIRTUAL TABLE artworks_fts USING fts5(
 ### 6.1 Model and cost
 
 - **Model:** Claude Haiku 4.5 via Batch API
-- **Input:** ~350 tokens per image (512px), ~50 tokens for prompt
-- **Output:** ~150 tokens per caption (description + keywords)
-- **Cost:** ~$0.00045/image → ~$112 for all ~248K public domain Met works (well within $500 budget)
+- **V1 cost:** ~$149 for 243K images (no metadata context — caused significant hallucination issues)
+- **V2 cost:** ~$185 for 243K images (metadata-grounded prompt, no keywords — better accuracy, cheaper output)
+- Batch pricing: $0.40/MTok input, $2.00/MTok output
 
-### 6.2 Captioning prompt
+### 6.2 Captioning prompt (V2 — metadata-grounded)
 
+V1 used a bare prompt with no metadata context, causing systematic errors: photography confusion (6.4%), subject hallucination (81% false positive rate for "dragon"), medium/material errors (1-5%), and cultural misattribution (1.4%). V2 fixes all of these by providing artwork metadata in the prompt.
+
+**System prompt:**
 ```
-Describe this artwork image in 2-3 sentences focusing on what is visually depicted: subjects, colors, composition, lighting, and scene. Then list 10-15 searchable keywords covering the visual content, mood, style, and any identifiable objects or themes.
+You are an art cataloger for the Metropolitan Museum of Art. You write concise visual
+descriptions of artworks for a searchable database.
 
-Format:
-Caption: [2-3 sentence visual description]
-Keywords: [comma-separated keywords]
+Rules:
+- Describe what the ARTWORK depicts or looks like, NOT the photograph of it. The image
+you see is a catalog photograph. Do not describe it as "a photograph" or mention the
+photographic background, unless the artwork itself IS a photograph.
+- Many catalog images are black-and-white archival photographs. If the image appears
+grayscale, do NOT describe the artwork as black, gray, or monochrome — instead, rely on
+the metadata for material and color information. Describe the artwork's likely original
+appearance, not the photograph's tonal range.
+- Ground your description in the provided metadata. Use the correct medium, materials,
+and cultural origin. Do not guess materials.
+- Focus on: visual content, subject matter, composition, colors/tones, and notable
+stylistic features.
+- Write 2-3 sentences. Be specific and factual.
 ```
 
-Example output:
+**User message** (per-artwork, includes metadata + image):
 ```
-Caption: A woman in a blue dress stands beside a sunlit window, reaching for a silver water pitcher on a wooden table. The scene is bathed in soft, warm light from the left, with a stained glass window and a large wall map visible in the background. The composition is intimate and contemplative, with careful attention to the play of light on fabric and metal.
-Keywords: woman, blue dress, window, sunlight, pitcher, silver, table, interior, domestic, contemplative, warm light, Baroque, portrait, still life, map
+Artwork metadata:
+- Title: {title}
+- Object type: {objectName}
+- Medium: {medium}
+- Department: {department}
+- Classification: {classification}
+- Culture: {culture}
+- Date: {objectDate}
+
+Describe this artwork.
 ```
 
-### 6.3 Pipeline step: `caption.py`
+Only non-empty metadata fields are included.
 
-- Reads crawled artwork data from previous step
-- For each public domain artwork with an image URL:
-  - Sends the image URL to Claude Haiku 4.5 via Batch API
-  - Parses the response into `caption` and `keywords` fields
-- Stores results alongside artwork metadata
-- Idempotent: skips already-captioned images on re-run
+### 6.3 Structured outputs
+
+Responses are guaranteed valid JSON via `output_config.format` with `json_schema`:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "caption": { "type": "string" }
+  },
+  "required": ["caption"],
+  "additionalProperties": false
+}
+```
+
+Keywords were dropped in V2 — they were redundant with caption + metadata in FTS5 and amplified hallucination errors.
+
+### 6.4 Pipeline step: `caption.py`
+
+Three subcommands: `submit`, `poll`, `collect`.
+
+- Reads crawled artwork data from `raw_artworks.db`, extracts metadata (title, objectName, medium, department, classification, culture, objectDate)
+- Sends `primaryImageSmall` URL + system prompt + metadata block via Batch API (Anthropic fetches images server-side)
+- Tracks batch state in `data/batches.db`, stores results in `data/captions.db`
+- Idempotent: skips already-captioned images on re-run. Use `--force` to re-caption all.
+- Rate limit handling: org rate limit (8K req/min) causes errors on large batches; resubmit until all complete
 
 ---
 
@@ -348,39 +396,75 @@ CREATE TABLE raw_artworks (
 ### Step 2: `caption.py` — Generate captions via Haiku 4.5 Batch
 
 **Input:** Raw artwork data from Step 1 (`raw_artworks.db`)
-**Output:** Captions + keywords stored in `captions.db`
+**Output:** Captions stored in `captions.db`
 
 1. Query `raw_artworks.db` for all verified public domain objects with images
 2. For each artwork:
-   - Build a Batch API request with the **thumbnail URL** (`primaryImageSmall`, typically 480-800px) + captioning prompt
-   - Use `primaryImageSmall`, not `primaryImage` — thumbnails are sufficient for visual descriptions, cost ~640 tokens vs ~1,600 for full-res, and reduce CDN pressure from concurrent fetches
+   - Extract metadata (title, objectName, medium, department, classification, culture, objectDate) from raw JSON
+   - Build a Batch API request with system prompt + metadata block + **thumbnail URL** (`primaryImageSmall`, typically 480-800px)
+   - Use structured outputs (`output_config.format` with `json_schema`) for guaranteed valid JSON
 3. Submit batch(es) to Claude Haiku 4.5 Batch API
-   - Batch API accepts up to 10,000 requests per batch
-   - ~248K images = ~20 batches
-4. Poll for completion (batches typically complete in minutes to hours)
-5. Parse responses: extract `caption` and `keywords` from each
+   - Batch API accepts up to 100,000 requests per batch
+   - ~243K images = 3 batches
+4. Poll for completion (batches typically complete in 1-4 hours)
+5. Collect results: parse JSON response, extract caption string
 6. Store in `captions.db` keyed by `met_object_id`
-7. Idempotent: skip already-captioned artworks on re-run
+7. Resubmit errored requests (rate limit errors) until all complete
+8. Idempotent: skip already-captioned artworks on re-run. Use `--force` to re-caption all.
 
-**No image downloads needed (primary approach).** The Claude Batch API supports Vision, and the Messages API supports URL-based image sources (`source.type: "url"`). Met CDN images are fetched server-side by Anthropic's infrastructure. Zero local image storage needed.
+**No image downloads needed.** The Batch API fetches `primaryImageSmall` URLs server-side from Met CDN. Zero local image storage.
 
-**Risk: concurrent CDN fetching.** The Batch API processes requests concurrently. 200K image URLs hitting Met CDN simultaneously could cause rate-limiting or fetch failures on individual requests. If this becomes a problem, the fallback is to download images locally and send them as base64-encoded data in the batch requests. This adds a download step (~50-100GB at 512px) but avoids CDN pressure.
+**Image errors.** 391 artworks (0.16%) had unfetchable images: dead CDN URLs, PDFs stored as images, or corrupt files. These are skipped and left with NULL captions. 45 had malformed JSON responses.
 
-**Budget:** ~$90-115 for ~248K images using thumbnails (Haiku 4.5 Batch: $0.50/MTok input, $2.50/MTok output). Using `primaryImageSmall` (~640 tokens/image) instead of `primaryImage` (~1,600 tokens/image) roughly halves the cost.
+**V1 cost:** ~$149 for 242,665 captioned images (no metadata, with keywords).
+**V2 cost:** ~$185 for 242,618 captioned images (metadata-grounded, no keywords). Higher input tokens from metadata offset by lower output tokens from dropping keywords.
+
+### Step 2b: `crawl_pages.py` — Crawl Met collection pages
+
+**Input:** Valid artwork IDs from `raw_artworks.db`
+**Output:** `met_pages.db` with curatorial descriptions
+
+Fetches the Met Museum collection page for each artwork (`https://www.metmuseum.org/art/collection/search/{id}`) and extracts curatorial description text.
+
+1. Get target IDs from `raw_artworks.db` (public domain + has image)
+2. Fetch each page via async aiohttp (75 concurrent, browser-like headers)
+3. Parse HTML: extract description from `data-testid="read-more-content"` element
+4. Strip HTML tags, store as plain text in `met_pages.db`
+5. Resume-safe: skips already-fetched pages on re-run
+
+**Rate limiting:** The Met website (unlike the API) has lenient rate limiting. No proxy needed — sustained ~140 req/s for first ~100K requests, then throttled to ~20 req/s. Zero 403/429 responses; throttling is TCP-level.
+
+**Coverage:** ~41% of artworks (99,669 / 243,054) have curatorial descriptions. The rest have no editorial content on their web pages.
+
+**Timing:** ~3.3 hours for all 243K pages without proxy.
+
+**Output schema:**
+```sql
+CREATE TABLE page_content (
+  met_object_id INTEGER PRIMARY KEY,
+  description TEXT,
+  fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+**Runs in parallel with `caption.py`** — both read from `raw_artworks.db`, write to separate DBs.
 
 ### Step 3: `build_db.py` — Build SQLite database
 
-**Input:** Raw artwork data + captions from Steps 1-2
+**Input:** Raw artwork data + captions + page content from Steps 1-2
 **Output:** `artworks.db`
 
 1. Create SQLite database with schema from Section 5
-2. For each artwork:
+2. Load captions from `captions.db` (if exists)
+3. Load descriptions from `met_pages.db` (if exists)
+4. For each artwork:
    - Extract structured fields from Met API JSON (title, artist, dates, medium, etc.)
-   - Insert caption + keywords from Step 2
+   - Merge caption from Step 2
+   - Merge description from Step 2b
    - Insert image URLs (primaryImage, primaryImageSmall)
-3. Build FTS5 index
-4. Optimize and vacuum
-5. Output: single `artworks.db` file ready for deployment
+5. Build FTS5 index
+6. Optimize and vacuum
+7. Output: single `artworks.db` file ready for deployment (~497 MB)
 
 ---
 
@@ -399,7 +483,7 @@ EXPOSE 3001
 CMD ["node", "dist/server.js"]
 ```
 
-The SQLite DB (~50-100MB) ships inside the container image. No persistent volumes needed since the DB is read-only and rebuilt from the pipeline.
+The SQLite DB (~500MB) ships inside the container image. No persistent volumes needed since the DB is read-only and rebuilt from the pipeline.
 
 ### Platform comparison
 
@@ -428,7 +512,8 @@ The SQLite DB (~50-100MB) ships inside the container image. No persistent volume
 ```bash
 # Re-run pipeline
 python scripts/crawl.py
-python scripts/caption.py
+python scripts/caption.py submit && python scripts/caption.py poll && python scripts/caption.py collect
+python scripts/crawl_pages.py
 python scripts/build_db.py
 
 # Rebuild and deploy
@@ -454,6 +539,7 @@ curator/
 ├── scripts/                   # Data pipeline (Python)
 │   ├── crawl.py               # Step 1: Crawl Met API
 │   ├── caption.py             # Step 2: Caption via Haiku Batch
+│   ├── crawl_pages.py         # Step 2b: Crawl Met pages for descriptions
 │   └── build_db.py            # Step 3: Build SQLite DB
 ├── data/
 │   └── artworks.db            # Built by pipeline (not in git)
@@ -471,8 +557,9 @@ curator/
 | Architecture | Monolith (Node.js + SQLite) | Fastest to ship, zero external deps, sufficient for 248K rows |
 | Database | SQLite + FTS5 | In-process (fastest), FTS5 for text search, read-only workload |
 | Search approach | Claude writes raw SQL | Most flexible — handles keyword, filter, aggregate, and iterative queries |
-| Captioning model | Haiku 4.5 Batch | ~$180 for all 248K images, well within $500 budget |
-| Caption style | Visual description + keywords | Grounded in what's visible, keywords boost search coverage |
+| Captioning model | Haiku 4.5 Batch | ~$149 actual for 243K images, well within $500 budget |
+| Caption output format | Structured outputs (json_schema) | Guarantees valid JSON, eliminates regex parsing and markdown artifacts |
+| Caption style | Metadata-grounded visual description | V2 includes artwork metadata in prompt to prevent hallucination. Keywords dropped (redundant with caption + metadata in FTS). |
 | Museum source | Met Museum only (V1) | Public domain images, English metadata, no auth, existing crawler |
 | Similarity search | Dropped | Full pivot to "Claude as curator" — Claude's intelligence replaces embeddings |
 | Vector database | Not needed | FTS5 + Claude's keyword intelligence is sufficient for V1 |
@@ -487,6 +574,8 @@ curator/
 | Crawl strategy | CSV filter + API fetch + residential proxy | CSV gives exact 248K public domain IDs (zero false positives vs 28% from search API). API only needed for image URLs. Residential proxy rotation bypasses Imperva WAF per-IP limit: ~3 hours instead of ~52. |
 | Image storage | URLs only, no downloads | Claude API accepts image URLs directly for captioning. Runtime viewer loads from Met CDN. Zero image storage. |
 | Deployment | Fly.io (recommended) | Sub-second cold start with auto-stop. Best fit for low-traffic MCP server. Hetzner VPS as runner-up. |
+| Page crawl | Description only, no provenance/exhibitions | Descriptions are most valuable for curator chatbot; provenance/exhibition tabs require fragile RSC parsing |
+| Page crawl rate limiting | No proxy needed | Met website has lenient rate limits (~140 req/s initial). Throttles to ~20 req/s after ~100K requests but no blocking. |
 | Naming | Deferred | Ship first, name later |
 
 ---
@@ -527,20 +616,25 @@ Crawl is complete (248K objects, ~3 hours via residential proxy). No longer the 
 9. Test end-to-end (cloudflared + Claude)         ✅ Done
 ```
 
-### Phase 3: Captioning
+### Phase 3: Captioning + Page Crawl ✅
 
 ```
-10. Write caption.py
-11. Run Haiku 4.5 Batch on all crawled artworks (~243K valid)
-    (hours, runs in background)
-12. Fix any caption parsing issues
+10. Write caption.py                               ✅ Done
+11. Run Haiku 4.5 Batch on all crawled artworks     ✅ Done
+    V1: 242,665 / 243,054 captioned (no metadata context — had hallucination issues)
+    V2: 242,618 / 243,054 captioned (metadata-grounded, keywords dropped)
+    - V2 fixed: photography confusion, subject hallucination, material errors, cultural misattribution
+    - 391 errored (unfetchable images), 45 malformed JSON
+12. Write crawl_pages.py                            ✅ Done
+13. Crawl Met collection pages for descriptions     ✅ Done — 99,669 / 243,054 with descriptions (41%)
+    - No proxy needed (~140 req/s initial, ~20 req/s after throttle)
+    - 3.3 hours total, 236 transient errors (0.1%)
+14. Rebuild artworks.db with all data + FTS5        ✅ Done — 497 MB (down from 562 MB after dropping keywords)
 ```
 
-### Phase 4: Full build + deploy
+### Phase 4: Deploy
 
 ```
-13. Rebuild artworks.db with captions + FTS5
-14. Re-test with full dataset
 15. Deploy to Fly.io
 16. Add as custom connector in Claude
 17. End-to-end smoke test in Claude
@@ -556,7 +650,6 @@ Crawl is complete (248K objects, ~3 hours via residential proxy). No longer the 
 
 ## 15. Open Questions (to resolve during implementation)
 
-- **Captioning batch size:** How to chunk 243K images into Batch API requests
 - **FTS5 tokenizer:** Default vs porter stemming vs unicode61
 - **Deployment region:** Fly.io region selection (US-east to minimize latency to Anthropic's servers)
 
