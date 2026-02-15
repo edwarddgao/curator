@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "build:ui": "INPUT=carousel.html vite build",
-    "serve": "npx tsx server.ts"
+    "serve": "npx tsx server.ts",
+    "benchmark": "tsx scripts/benchmark.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^1.0.1",

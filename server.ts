@@ -25,10 +25,17 @@ const MAX_ROWS = 100;
 const resourceUri = "ui://art-curator/carousel.html";
 
 function createServer(): McpServer {
-  const server = new McpServer({
-    name: "Art Curator",
-    version: "1.0.0",
-  });
+  const server = new McpServer(
+    {
+      name: "Art Curator",
+      version: "1.0.0",
+    },
+    {
+      instructions: `You are an art curator assistant with access to a database of 243,000+ artworks from the Metropolitan Museum of Art.
+
+When showing artworks, display each artwork's info (title, artist, date, medium, etc.) immediately after its image using show_artwork, rather than batching all details at the end. Interleave images and descriptions so the user sees context for each piece as they view it.`,
+    }
+  );
 
   // --- Tool: query_artworks (no UI) ---
   const queryDescription = `Execute a read-only SQL query against the artworks database.
@@ -53,7 +60,7 @@ Schema:
     culture TEXT,
     period TEXT,
     caption TEXT,               -- AI-generated visual description
-    keywords TEXT,              -- comma-separated searchable terms
+    description TEXT,           -- curatorial essay from Met website (NULL for 59% of artworks)
     image_url TEXT,             -- full resolution (Met CDN)
     thumbnail_url TEXT,         -- web-size (Met CDN)
     object_url TEXT,            -- link to Met museum page
@@ -63,11 +70,17 @@ Schema:
     is_highlight BOOLEAN
   )
 
-  artworks_fts (FTS5 virtual table over: title, artist_name, medium, caption, keywords, culture, period, department)
+  artworks_fts (FTS5 virtual table over: title, artist_name, medium, caption, description, culture, period, department)
+  NOTE: artworks_fts does NOT have id or other columns from artworks. Always JOIN to get full data:
+    SELECT a.* FROM artworks a JOIN artworks_fts f ON a.rowid = f.rowid WHERE artworks_fts MATCH '...' LIMIT 20;
+
+IMPORTANT: Prefer FTS over LIKE for text searches — it is 100x+ faster. Use column-scoped FTS for targeted searches (e.g. artist_name:Vermeer).
+  Avoid: SELECT * FROM artworks WHERE artist_name LIKE '%Vermeer%' (full table scan, ~60ms)
+  Use:   SELECT a.* FROM artworks a JOIN artworks_fts f ON a.rowid = f.rowid WHERE artworks_fts MATCH 'artist_name:Vermeer' LIMIT 20; (~0.4ms)
 
 Example queries:
-  SELECT * FROM artworks WHERE artist_name LIKE '%Vermeer%' LIMIT 20;
-  SELECT id, title, artist_name, object_date, thumbnail_url FROM artworks_fts WHERE artworks_fts MATCH 'boats AND storms' LIMIT 20;
+  SELECT a.* FROM artworks a JOIN artworks_fts f ON a.rowid = f.rowid WHERE artworks_fts MATCH 'artist_name:Vermeer' LIMIT 20;
+  SELECT a.* FROM artworks a JOIN artworks_fts f ON a.rowid = f.rowid WHERE artworks_fts MATCH 'storm AND ship' LIMIT 20;
   SELECT * FROM artworks WHERE date_begin >= 1800 AND date_end <= 1899 AND department = 'European Paintings' LIMIT 20;
   SELECT COUNT(*) as count, department FROM artworks GROUP BY department ORDER BY count DESC;
 
@@ -84,6 +97,17 @@ Return results as JSON. Max ${MAX_ROWS} rows per query.`;
           return {
             content: [
               { type: "text" as const, text: "Error: Only SELECT queries are allowed." },
+            ],
+          };
+        }
+
+        // Reject LIKE on FTS-indexed columns — FTS MATCH is 100x faster
+        const FTS_COLUMNS = ["title", "artist_name", "medium", "caption", "description", "culture", "period", "department"];
+        const likeMatch = normalized.match(/(?:\.)?(\w+)\s+LIKE\s+/i);
+        if (likeMatch && FTS_COLUMNS.includes(likeMatch[1])) {
+          return {
+            content: [
+              { type: "text" as const, text: `Error: LIKE on "${likeMatch[1]}" is too slow (full table scan). Use FTS instead:\n  SELECT a.* FROM artworks a JOIN artworks_fts f ON a.rowid = f.rowid WHERE artworks_fts MATCH '${likeMatch[1]}:search_term' LIMIT 20;` },
             ],
           };
         }
@@ -114,7 +138,7 @@ Return results as JSON. Max ${MAX_ROWS} rows per query.`;
     {
       title: "Show Artwork",
       description:
-        "Display a single artwork image inline. Call query_artworks first to find artworks, then pass one ID here. Call multiple times to show multiple images.",
+        "Display a single artwork image inline. Call query_artworks first to find artworks, then pass one ID here. Call multiple times to show multiple images. IMPORTANT: After each show_artwork call, immediately describe that artwork (title, artist, date, medium, etc.) before calling show_artwork again. Interleave images and descriptions — never batch all descriptions at the end.",
       inputSchema: z.object({
         id: z.number().int().describe("Artwork ID to display"),
       }),
