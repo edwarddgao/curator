@@ -2,7 +2,7 @@
   "mcpServers": {
     "art-curator": {
       "type": "http",
-      "url": "http://localhost:3001/mcp"
+      "url": "https://art-curator.fly.dev/mcp"
     }
   }
 }

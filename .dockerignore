@@ -1,0 +1,30 @@
+node_modules/
+
+# Pipeline DBs (artworks.db is needed — not listed here)
+data/raw_artworks.db
+data/captions.db
+data/captions_v1.db
+data/batches.db
+data/batches_v1.db
+data/met_pages.db
+data/*.db-shm
+data/*.db-wal
+
+# Pipeline scripts
+scripts/
+
+# Original artalike project
+artalike/
+
+# Git
+.git/
+.gitignore
+
+# Build artifacts (rebuilt in container)
+dist/
+
+# Misc
+.DS_Store
+.env
+SPEC.md
+.claude/

@@ -114,7 +114,7 @@ Displays a single artwork image inline in the chat. Claude calls this after cura
 **Returns:** Text content with full artwork metadata (JSON) + `structuredContent.artwork` for the UI.
 
 ```typescript
-const resourceUri = "ui://art-curator/carousel.html";
+const resourceUri = "ui://art-curator/viewer.html";
 
 registerAppTool(server, "show_artwork", {
   title: "Show Artwork",
@@ -472,18 +472,33 @@ CREATE TABLE page_content (
 
 ### Container
 
+Multi-stage Docker build. Stage 1 builds the viewer UI (needs Vite + dev deps). Stage 2 is production (only runtime deps + tsx).
+
 ```dockerfile
-FROM node:20-slim
+# Stage 1: Build UI
+FROM node:22-slim AS builder
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --production
-COPY dist/ ./dist/
-COPY artworks.db ./data/
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY vite.config.ts tsconfig.json viewer.html ./
+COPY src/ ./src/
+RUN npm run build
+
+# Stage 2: Production
+FROM node:22-slim
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY --from=builder /app/dist/viewer.html ./dist/
+COPY server.ts ./
+COPY data/artworks.db ./data/
 EXPOSE 3001
-CMD ["node", "dist/server.js"]
+CMD ["npm", "start"]
 ```
 
-The SQLite DB (~500MB) ships inside the container image. No persistent volumes needed since the DB is read-only and rebuilt from the pipeline.
+The server runs as TypeScript via `tsx` at runtime (tsx is a production dependency). The SQLite DB (~500MB) ships inside the container image. No persistent volumes needed since the DB is read-only and rebuilt from the pipeline.
+
+**Image size:** ~750-800 MB (200 MB base + 50 MB node_modules + 497 MB DB). The DB dominates.
 
 ### Platform comparison
 
@@ -507,6 +522,15 @@ The SQLite DB (~500MB) ships inside the container image. No persistent volumes n
 
 **Avoid: Render free tier** — 30-60 second cold start is likely to cause MCP protocol timeouts.
 
+### Deployed instance
+
+- **URL:** https://art-curator.fly.dev/
+- **MCP endpoint:** POST https://art-curator.fly.dev/mcp
+- **Health check:** GET https://art-curator.fly.dev/health
+- **Region:** iad (US-East, Ashburn VA)
+- **VM:** 512MB shared CPU, auto-stop/auto-start, scale-to-zero
+- **Auth:** None (public data, read-only)
+
 ### Update process
 
 ```bash
@@ -518,8 +542,7 @@ python scripts/build_db.py
 
 # Rebuild and deploy
 npm run build
-# copy artworks.db into container
-fly deploy
+fly deploy --remote-only
 ```
 
 ---
@@ -533,9 +556,9 @@ curator/
 ├── tsconfig.json
 ├── vite.config.ts
 ├── server.ts                  # MCP server (tools + resources + Express)
-├── carousel.html              # Artwork viewer UI entry point
+├── viewer.html                # Artwork viewer UI entry point
 ├── src/
-│   └── carousel.ts            # Artwork viewer logic (App class, image rendering)
+│   └── viewer.ts              # Artwork viewer logic (App class, image rendering)
 ├── scripts/                   # Data pipeline (Python)
 │   ├── crawl.py               # Step 1: Crawl Met API
 │   ├── caption.py             # Step 2: Caption via Haiku Batch
@@ -543,9 +566,12 @@ curator/
 │   └── build_db.py            # Step 3: Build SQLite DB
 ├── data/
 │   └── artworks.db            # Built by pipeline (not in git)
-└── dist/                      # Built assets (not in git)
-    ├── server.js
-    └── carousel.html          # Bundled single-file HTML
+├── dist/                      # Built assets (not in git)
+│   └── viewer.html            # Bundled single-file HTML
+├── Dockerfile                 # Multi-stage build (node:22-slim)
+├── fly.toml                   # Fly.io config (iad, auto-stop, health check)
+├── .dockerignore              # Excludes pipeline DBs, scripts, etc.
+└── .mcp.json                  # MCP server config for Claude Code
 ```
 
 ---
@@ -632,17 +658,20 @@ Crawl is complete (248K objects, ~3 hours via residential proxy). No longer the 
 14. Rebuild artworks.db with all data + FTS5        ✅ Done — 497 MB (down from 562 MB after dropping keywords)
 ```
 
-### Phase 4: Deploy
+### Phase 4: Deploy ✅
 
 ```
-15. Deploy to Fly.io
-16. Add as custom connector in Claude
-17. End-to-end smoke test in Claude
+15. Deploy to Fly.io                              ✅ Done — https://art-curator.fly.dev/
+    - Multi-stage Docker build (node:22-slim)
+    - Auto-stop/auto-start, scale-to-zero, 512MB shared CPU
+    - Per-request MCP server + transport (stateless)
+16. Add as custom connector in Claude              ✅ Done — .mcp.json with HTTP transport
+17. End-to-end smoke test in Claude                ✅ Done — queries, FTS, show_artwork all working
 ```
 
 ### Why this order
 
-- **Test DB early:** Don't wait for captions to start building the server. The full crawl data with just metadata (no captions) is enough to develop and test the MCP tools and carousel UI.
+- **Test DB early:** Don't wait for captions to start building the server. The full crawl data with just metadata (no captions) is enough to develop and test the MCP tools and viewer UI.
 - **Caption last:** Captioning is expensive ($90-115) and the prompt may need iteration. Get the server working first so you can evaluate caption quality in context.
 - **Deploy after captioning:** The full DB with captions is needed for a meaningful deployment.
 
@@ -651,12 +680,13 @@ Crawl is complete (248K objects, ~3 hours via residential proxy). No longer the 
 ## 15. Open Questions (to resolve during implementation)
 
 - **FTS5 tokenizer:** Default vs porter stemming vs unicode61
-- **Deployment region:** Fly.io region selection (US-east to minimize latency to Anthropic's servers)
 
 ### Resolved
 
-- **UI design:** Single full-width image per tool call. Claude writes all text (artist, date, commentary). No carousel/cards.
+- **UI design:** Single full-width image per tool call. Claude writes all text (artist, date, commentary). No cards/controls.
 - **Full image handling:** UI shows `image_url` (full res) with fallback to `thumbnail_url`. Both from Met CDN.
 - **Context updates:** Not needed — each `show_artwork` call returns full metadata as text to Claude.
 - **CSP for images:** Use `resourceDomains` (not `connectDomains`) to allowlist Met CDN.
 - **registerAppTool vs server.tool:** `query_artworks` (no UI) uses `server.tool()` with Zod schemas. `show_artwork` (with UI) uses `registerAppTool` which requires `_meta.ui.resourceUri`.
+- **Deployment region:** Fly.io `iad` (US-East, Ashburn VA) — close to Anthropic's servers.
+- **MCP transport pattern:** Per-request server + transport (stateless). Each POST to `/mcp` creates a fresh `McpServer` + `StreamableHTTPServerTransport`, handles the request, then closes. Singleton transport doesn't work because MCP protocol requires `initialize` before tool calls, and stateless mode has no session persistence.

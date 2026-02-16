@@ -18,11 +18,9 @@ const DIST_DIR = path.join(import.meta.dirname, "dist");
 
 // Open DB read-only
 const db = new Database(DB_PATH, { readonly: true });
-db.pragma("journal_mode = WAL");
-db.pragma("busy_timeout = 5000");
 
 const MAX_ROWS = 100;
-const resourceUri = "ui://art-curator/carousel.html";
+const resourceUri = "ui://art-curator/viewer.html";
 
 function createServer(): McpServer {
   const server = new McpServer(
@@ -171,14 +169,14 @@ Return results as JSON. Max ${MAX_ROWS} rows per query.`;
     }
   );
 
-  // --- Resource: carousel HTML ---
+  // --- Resource: artwork viewer HTML ---
   registerAppResource(
     server,
     "Artwork Viewer",
     resourceUri,
     { mimeType: RESOURCE_MIME_TYPE },
     async () => {
-      const htmlPath = path.join(DIST_DIR, "carousel.html");
+      const htmlPath = path.join(DIST_DIR, "viewer.html");
       const html = fs.readFileSync(htmlPath, "utf-8");
       return {
         contents: [
@@ -207,16 +205,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const mcpServer = createServer();
-
 app.post("/mcp", async (req, res) => {
+  const server = createServer();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless
   });
-  res.on("close", () => {
-    transport.close();
-  });
-  await mcpServer.connect(transport);
+  res.on("close", () => transport.close());
+  await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
 
@@ -229,3 +224,6 @@ app.listen(PORT, () => {
   console.log(`  DB: ${DB_PATH}`);
   console.log(`  MCP endpoint: POST http://localhost:${PORT}/mcp`);
 });
+
+process.on("SIGTERM", () => { db.close(); process.exit(0); });
+process.on("SIGINT", () => { db.close(); process.exit(0); });

@@ -4,8 +4,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build:ui": "INPUT=carousel.html vite build",
-    "serve": "npx tsx server.ts",
+    "build": "INPUT=viewer.html vite build",
+    "build:ui": "INPUT=viewer.html vite build",
+    "start": "tsx server.ts",
+    "serve": "tsx server.ts",
     "benchmark": "tsx scripts/benchmark.ts"
   },
   "dependencies": {
@@ -13,13 +15,14 @@
     "@modelcontextprotocol/sdk": "^1.12.0",
     "better-sqlite3": "^11.0.0",
     "cors": "^2.8.5",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "tsx": "^4.19.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
     "vite-plugin-singlefile": "^2.0.0"
