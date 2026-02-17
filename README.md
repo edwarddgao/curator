@@ -2,6 +2,9 @@
 
 An MCP server that gives Claude direct SQL access to 243,000+ captioned artworks from the Metropolitan Museum of Art. Claude acts as an art curator — searching, recommending, and displaying artwork images inline in conversation.
 
+[![Video Title](https://img.youtube.com/vi/s_pfyLrQWBo/0.jpg)](https://www.youtube.com/watch?v=s_pfyLrQWBo)
+
+
 ## How it works
 
 Users ask Claude about art in natural language. Claude writes SQL queries against a structured database with full-text search, curates the best matches, and presents them with commentary and inline images.
